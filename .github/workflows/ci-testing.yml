@@ -1,388 +1,152 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # YOLOv5 Continuous Integration (CI) GitHub Actions tests
+
 name: YOLOv5 CI
 
-# 最小权限原则配置
 permissions:
   contents: read
-  actions: read
-  artifacts: write  # 用于上传测试/基准测试日志
 
-# CI 触发条件
 on:
   push:
-    branches: [master]  # master 分支推送时触发
+    branches: [master]
   pull_request:
-    branches: [master]  # master 分支PR时触发
+    branches: [master]
   schedule:
-    - cron: "0 0 * * *"  # 每天UTC 0点自动运行
-  workflow_dispatch:  # 手动触发CI
-
-# 全局环境变量（统一配置，便于维护）
-env:
-  # UV 虚拟环境路径（跨系统兼容，Linux/macOS/Windows）
-  UV_VENV_PATH: ${{ github.workspace }}/uv-venv
-  # ONNX 相关依赖兼容版本（解决版本冲突）
-  ONNX_VERSION: "1.20.0"
-  ONNXSCRIPT_VERSION: "0.11.0"
-  ONNX_SIMPLIFIER_VERSION: "0.4.1"
-  # 测试参数配置
-  IMGSZ_BENCHMARK: 320
-  IMGSZ_TEST: 64
-  BATCH_SIZE_TEST: 32
-  EPOCHS_TEST: 1
-  MODEL: "yolov5n"
+    - cron: "0 0 * * *" # runs at 00:00 UTC every day
+  workflow_dispatch:
 
 jobs:
-  # 任务1：基准测试（检测/分割模型性能 + ONNX导出验证）
   Benchmarks:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false  # 一个配置失败不影响其他配置
-      matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.11"]
-        model: [yolov5n]
-    steps:
-      # 步骤1：检出仓库代码
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      # 步骤2：配置Python环境
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: "pip"  # 启用pip缓存（可选，加速依赖安装）
-
-      # 步骤3：安装uv包管理器（现代Python包管理器）
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"  # 使用最新版uv
-
-      # 步骤4：创建UV虚拟环境（解决「No virtual environment found」报错）
-      - name: Create UV virtual environment
-        run: |
-          # 创建uv虚拟环境（指定路径）
-          uv venv ${{ env.UV_VENV_PATH }}
-          # 验证虚拟环境创建成功
-          if [ -d "${{ env.UV_VENV_PATH }}" ]; then
-            echo "✅ UV virtual environment created at ${{ env.UV_VENV_PATH }}"
-          else
-            echo "❌ UV virtual environment creation failed"
-            exit 1
-          fi
-        shell: bash
-
-      # 步骤5：激活UV虚拟环境并添加到系统PATH（关键：后续命令使用该环境）
-      - name: Activate UV virtual environment
-        run: |
-          # Linux/macOS激活脚本路径
-          if [[ "$RUNNER_OS" == "Linux" || "$RUNNER_OS" == "macOS" ]]; then
-            VENV_BIN_PATH="${{ env.UV_VENV_PATH }}/bin"
-            echo "$VENV_BIN_PATH" >> $GITHUB_PATH
-            # 验证激活（执行python --version确认环境）
-            $VENV_BIN_PATH/python --version
-          # Windows激活脚本路径
-          elif [[ "$RUNNER_OS" == "Windows" ]]; then
-            VENV_BIN_PATH="${{ env.UV_VENV_PATH }}/Scripts"
-            echo "$VENV_BIN_PATH" >> $GITHUB_PATH
-            # 验证激活
-            $VENV_BIN_PATH/python --version
-          fi
-        shell: bash
-
-      # 步骤6：缓存UV依赖和数据集（加速CI运行，避免重复下载）
-      - name: Cache UV dependencies and datasets
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/uv
-            ${{ env.UV_VENV_PATH }}
-            datasets/
-          key: ${{ matrix.os }}-uv-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ matrix.os }}-uv-${{ matrix.python-version }}-
-
-      # 步骤7：安装依赖（核心：强制安装ONNX依赖，解决未下载问题）
-      - name: Install dependencies
-        run: |
-          # 清理UV缓存（避免旧解析逻辑干扰）
-          uv cache clean
-          # 安装依赖：显式指定ONNX相关版本，强制安装
-          uv pip install -U \
-            -r requirements.txt \
-            coremltools \
-            openvino-dev \
-            "tensorflow<=2.19.0" \
-            onnx==${{ env.ONNX_VERSION }} \
-            onnxscript==${{ env.ONNXSCRIPT_VERSION }} \
-            onnx-simplifier>=${{ env.ONNX_SIMPLIFIER_VERSION }} \
-            --extra-index-url https://download.pytorch.org/whl/cpu
-          # 关键验证：确认ONNX依赖安装并能导入（失败则终止CI）
-          python -c "import onnx, onnxscript, onnxsim; print(f'onnx version: {onnx.__version__}'); print(f'onnxscript version: {onnxscript.__version__}'); print('✅ ONNX dependencies imported successfully!')"
-          # 检查Ultralytics环境并列出已安装包（调试用）
-          yolo checks
-          uv pip list
-        shell: bash
-
-      # 步骤8：基准测试 - 检测模型
-      - name: Benchmark DetectionModel
-        run: |
-          python benchmarks.py \
-            --data coco128.yaml \
-            --weights ${{ matrix.model }}.pt \
-            --img ${{ env.IMGSZ_BENCHMARK }} \
-            --hard-fail 0.29
-        shell: bash
-
-      # 步骤9：基准测试 - 分割模型
-      - name: Benchmark SegmentationModel
-        run: |
-          python benchmarks.py \
-            --data coco128-seg.yaml \
-            --weights ${{ matrix.model }}-seg.pt \
-            --img ${{ env.IMGSZ_BENCHMARK }} \
-            --hard-fail 0.22
-        shell: bash
-
-      # 步骤10：测试预测 - ONNX导出+推理验证
-      - name: Test predictions (ONNX)
-        run: |
-          # 导出ONNX格式
-          python export.py --weights ${{ matrix.model }}-cls.pt --include onnx --img 224
-          # 验证检测/分割/分类的ONNX推理
-          python detect.py --weights ${{ matrix.model }}.onnx --img ${{ env.IMGSZ_BENCHMARK }}
-          python segment/predict.py --weights ${{ matrix.model }}-seg.onnx --img ${{ env.IMGSZ_BENCHMARK }}
-          python classify/predict.py --weights ${{ matrix.model }}-cls.onnx --img 224
-        shell: bash
-
-      # 步骤11：上传基准测试日志（失败时上传，便于调试）
-      - name: Upload Benchmarks artifacts
-        uses: actions/upload-artifact@v4
-        if: failure()  # 仅在任务失败时上传
-        with:
-          name: ${{ matrix.os }}-${{ matrix.python-version }}-benchmarks-logs
-          path: |
-            runs/
-            *.log
-            ${{ env.UV_VENV_PATH }}/lib/python*/site-packages/onnx*  # 可选：上传ONNX依赖安装目录
-          retention-days: 7  # 日志保留7天
-
-  # 任务2：全功能测试（跨系统/Python版本的检测/分割/分类测试）
-  Tests:
-    timeout-minutes: 60  # 超时时间：60分钟
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]  # 规避macos-latest的已知bug
+        os: [ubuntu-latest]
+        python-version: ["3.11"] # requires python<=3.11
+        model: [yolov5n]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v7
+      - name: Install requirements
+        run: |
+          uv pip install --system -r requirements.txt coremltools openvino-dev "tensorflow<=2.19.0" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+          yolo checks
+          uv pip list
+      - name: Benchmark DetectionModel
+        run: |
+          python benchmarks.py --data coco128.yaml --weights ${{ matrix.model }}.pt --img 320 --hard-fail 0.29
+      - name: Benchmark SegmentationModel
+        run: |
+          python benchmarks.py --data coco128-seg.yaml --weights ${{ matrix.model }}-seg.pt --img 320 --hard-fail 0.22
+      - name: Test predictions
+        run: |
+          python export.py --weights ${{ matrix.model }}-cls.pt --include onnx --img 224
+          python detect.py --weights ${{ matrix.model }}.onnx --img 320
+          python segment/predict.py --weights ${{ matrix.model }}-seg.onnx --img 320
+          python classify/predict.py --weights ${{ matrix.model }}-cls.onnx --img 224
+
+  Tests:
+    timeout-minutes: 60
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14] # macos-latest bug https://github.com/ultralytics/yolov5/pull/9049
         python-version: ["3.11"]
         model: [yolov5n]
         include:
           - os: ubuntu-latest
-            python-version: "3.8"  # 兼容PyTorch 1.8.0（最低支持版本）
-            model: [yolov5n]
-            torch: "1.8.0"  # 标记需要安装旧版PyTorch
+            python-version: "3.8" # torch 1.8.0 requires python >=3.6, <=3.8
+            model: yolov5n
+            torch: "1.8.0" # min torch version CI https://pypi.org/project/torchvision/
     steps:
-      # 步骤1：检出仓库代码
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      # 步骤2：配置Python环境
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-
-      # 步骤3：安装uv包管理器
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      # 步骤4：创建UV虚拟环境（解决虚拟环境报错）
-      - name: Create UV virtual environment
+      - uses: astral-sh/setup-uv@v7
+      - name: Install requirements
         run: |
-          uv venv ${{ env.UV_VENV_PATH }}
-          # 验证虚拟环境创建
-          if [ -d "${{ env.UV_VENV_PATH }}" ]; then
-            echo "✅ UV virtual environment created at ${{ env.UV_VENV_PATH }}"
-          else
-            echo "❌ UV virtual environment creation failed"
-            exit 1
-          fi
-        shell: bash
-
-      # 步骤5：激活UV虚拟环境并添加到PATH
-      - name: Activate UV virtual environment
-        run: |
-          if [[ "$RUNNER_OS" == "Linux" || "$RUNNER_OS" == "macOS" ]]; then
-            VENV_BIN_PATH="${{ env.UV_VENV_PATH }}/bin"
-          elif [[ "$RUNNER_OS" == "Windows" ]]; then
-            VENV_BIN_PATH="${{ env.UV_VENV_PATH }}/Scripts"
-          fi
-          echo "$VENV_BIN_PATH" >> $GITHUB_PATH
-          # 验证Python环境
-          $VENV_BIN_PATH/python --version
-        shell: bash
-
-      # 步骤6：缓存UV依赖和数据集
-      - name: Cache UV dependencies and datasets
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/uv
-            ${{ env.UV_VENV_PATH }}
-            datasets/
-          key: ${{ matrix.os }}-uv-${{ matrix.python-version }}-${{ matrix.torch || 'latest' }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ matrix.os }}-uv-${{ matrix.python-version }}-${{ matrix.torch || 'latest' }}-
-
-      # 步骤7：安装依赖（处理旧版PyTorch，强制安装核心依赖）
-      - name: Install dependencies
-        shell: bash  # 跨系统兼容
-        run: |
-          # 清理UV缓存
-          uv cache clean
-          # 处理PyTorch 1.8.0（最低版本）的安装
-          torch_pkgs=""
+          torch=""
           if [ "${{ matrix.torch }}" == "1.8.0" ]; then
-            # PyTorch 1.8.0 CPU版本需要指定旧索引
-            torch_pkgs="torch==1.8.0+cpu torchvision==0.9.0+cpu -f https://download.pytorch.org/whl/torch_stable.html"
+            torch="torch==1.8.0 torchvision==0.9.0"
           fi
-          # 安装依赖：包含旧版PyTorch（若有）
-          uv pip install -U \
-            -r requirements.txt \
-            $torch_pkgs \
-            --extra-index-url https://download.pytorch.org/whl/cpu
-          # 验证环境
-          yolo checks
-          python -m pip list
-        shell: bash
-
-      # 步骤8：测试检测模型（训练/验证/推理/导出）
-      - name: Test detection
-        shell: bash
+          uv pip install --system -r requirements.txt $torch --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+        shell: bash # for Windows compatibility
+      - name: Check environment
         run: |
-          m=${{ matrix.model }}  # 官方权重
-          b=runs/train/exp/weights/best  # 训练后的权重
-          # 训练模型（1 epoch，CPU）
-          python train.py \
-            --imgsz ${{ env.IMGSZ_TEST }} \
-            --batch ${{ env.BATCH_SIZE_TEST }} \
-            --weights $m.pt \
-            --cfg $m.yaml \
-            --epochs ${{ env.EPOCHS_TEST }} \
-            --device cpu
-          # 验证+推理（CPU）
-          for d in cpu; do
-            for w in $m $b; do
-              python val.py --imgsz ${{ env.IMGSZ_TEST }} --batch ${{ env.BATCH_SIZE_TEST }} --weights $w.pt --device $d
-              python detect.py --imgsz ${{ env.IMGSZ_TEST }} --weights $w.pt --device $d
+          yolo checks
+          pip list
+      - name: Test detection
+        shell: bash # for Windows compatibility
+        run: |
+          # export PYTHONPATH="$PWD"  # to run '$ python *.py' files in subdirectories
+          m=${{ matrix.model }}  # official weights
+          b=runs/train/exp/weights/best  # best.pt checkpoint
+          python train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu  # train
+          for d in cpu; do  # devices
+            for w in $m $b; do  # weights
+              python val.py --imgsz 64 --batch 32 --weights $w.pt --device $d  # val
+              python detect.py --imgsz 64 --weights $w.pt --device $d  # detect
             done
           done
-          # 测试Hub配置、模型构建、TorchScript导出
-          python hubconf.py --model $m
-          python models/yolo.py --cfg $m.yaml
-          python export.py --weights $m.pt --img ${{ env.IMGSZ_TEST }} --include torchscript
-          # 测试Torch Hub加载和JIT追踪
+          python hubconf.py --model $m  # hub
+          # python models/tf.py --weights $m.pt  # build TF model
+          python models/yolo.py --cfg $m.yaml  # build PyTorch model
+          python export.py --weights $m.pt --img 64 --include torchscript  # export
           python - <<EOF
           import torch
-          im = torch.zeros([1, 3, ${{ env.IMGSZ_TEST }}, ${{ env.IMGSZ_TEST }}])
+          im = torch.zeros([1, 3, 64, 64])
           for path in '$m', '$b':
-              model = torch.hub.load('.', 'custom', path=path+'.pt', source='local')
+              model = torch.hub.load('.', 'custom', path=path, source='local')
               print(model('data/images/bus.jpg'))
-              model(im)  # 预热模型
+              model(im)  # warmup, build grids for trace
               torch.jit.trace(model, [im])
           EOF
-        shell: bash
-
-      # 步骤9：测试分割模型
       - name: Test segmentation
-        shell: bash
+        shell: bash # for Windows compatibility
         run: |
-          m=${{ matrix.model }}-seg  # 官方权重
-          b=runs/train-seg/exp/weights/best  # 训练后的权重
-          # 训练模型（带权重/空权重）
-          python segment/train.py \
-            --imgsz ${{ env.IMGSZ_TEST }} \
-            --batch ${{ env.BATCH_SIZE_TEST }} \
-            --weights $m.pt \
-            --cfg $m.yaml \
-            --epochs ${{ env.EPOCHS_TEST }} \
-            --device cpu
-          python segment/train.py \
-            --imgsz ${{ env.IMGSZ_TEST }} \
-            --batch ${{ env.BATCH_SIZE_TEST }} \
-            --weights '' \
-            --cfg $m.yaml \
-            --epochs ${{ env.EPOCHS_TEST }} \
-            --device cpu
-          # 验证+推理+导出
-          for d in cpu; do
-            for w in $m $b; do
-              python segment/val.py --imgsz ${{ env.IMGSZ_TEST }} --batch ${{ env.BATCH_SIZE_TEST }} --weights $w.pt --device $d
-              python segment/predict.py --imgsz ${{ env.IMGSZ_TEST }} --weights $w.pt --device $d
-              python export.py --weights $w.pt --img ${{ env.IMGSZ_TEST }} --include torchscript --device $d
+          m=${{ matrix.model }}-seg  # official weights
+          b=runs/train-seg/exp/weights/best  # best.pt checkpoint
+          python segment/train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu  # train
+          python segment/train.py --imgsz 64 --batch 32 --weights '' --cfg $m.yaml --epochs 1 --device cpu  # train
+          for d in cpu; do  # devices
+            for w in $m $b; do  # weights
+              python segment/val.py --imgsz 64 --batch 32 --weights $w.pt --device $d  # val
+              python segment/predict.py --imgsz 64 --weights $w.pt --device $d  # predict
+              python export.py --weights $w.pt --img 64 --include torchscript --device $d  # export
             done
           done
-        shell: bash
-
-      # 步骤10：测试分类模型
       - name: Test classification
-        shell: bash
+        shell: bash # for Windows compatibility
         run: |
-          m=${{ matrix.model }}-cls.pt  # 官方权重
-          b=runs/train-cls/exp/weights/best.pt  # 训练后的权重
-          # 训练模型
-          python classify/train.py \
-            --imgsz 32 \
-            --model $m \
-            --data mnist160 \
-            --epochs ${{ env.EPOCHS_TEST }}
-          # 验证+推理
-          python classify/val.py --imgsz 32 --weights $b --data ../datasets/mnist160
-          python classify/predict.py --imgsz 32 --weights $b --source ../datasets/mnist160/test/7/60.png
-          python classify/predict.py --imgsz 32 --weights $m --source data/images/bus.jpg
-          # 导出TorchScript
-          python export.py --weights $b --img ${{ env.IMGSZ_TEST }} --include torchscript
-          # 测试Torch Hub加载
+          m=${{ matrix.model }}-cls.pt  # official weights
+          b=runs/train-cls/exp/weights/best.pt  # best.pt checkpoint
+          python classify/train.py --imgsz 32 --model $m --data mnist160 --epochs 1  # train
+          python classify/val.py --imgsz 32 --weights $b --data ../datasets/mnist160  # val
+          python classify/predict.py --imgsz 32 --weights $b --source ../datasets/mnist160/test/7/60.png  # predict
+          python classify/predict.py --imgsz 32 --weights $m --source data/images/bus.jpg  # predict
+          python export.py --weights $b --img 64 --include torchscript  # export
           python - <<EOF
           import torch
           for path in '$m', '$b':
               model = torch.hub.load('.', 'custom', path=path, source='local')
           EOF
-        shell: bash
 
-      # 步骤11：上传测试日志（失败时上传）
-      - name: Upload Tests artifacts
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: ${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.torch || 'latest' }}-tests-logs
-          path: runs/
-          retention-days: 7
-
-  # 任务3：结果汇总（失败时发送Slack通知）
   Summary:
     runs-on: ubuntu-latest
-    needs: [Benchmarks, Tests]  # 依赖前两个任务
-    if: always()  # 无论前序任务是否失败，都执行此任务
+    needs: [Benchmarks, Tests]
+    if: always()
     steps:
-      - name: Send Slack notification on failure/cancellation
-        if: |
-          (needs.Benchmarks.result == 'failure' || needs.Tests.result == 'failure' ||
-           needs.Benchmarks.result == 'cancelled' || needs.Tests.result == 'cancelled') &&
-          github.repository == 'ultralytics/yolov5' &&  # 仅在官方仓库生效（可根据需要修改）
-          (github.event_name == 'schedule' || github.event_name == 'push') &&
-          github.run_attempt == '1'  # 仅第一次运行失败时通知
+      - name: Check for failure and notify
+        if: (needs.Benchmarks.result == 'failure' || needs.Tests.result == 'failure' || needs.Benchmarks.result == 'cancelled' || needs.Tests.result == 'cancelled') && github.repository == 'ultralytics/yolov5' && (github.event_name == 'schedule' || github.event_name == 'push') && github.run_attempt == '1'
         uses: slackapi/slack-github-action@v2.1.1
         with:
           webhook-type: incoming-webhook
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL_YOLO }}  # 需在仓库Secrets中配置
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL_YOLO }}
           payload: |
-            {
-              "text": "<!channel> GitHub Actions error for ${{ github.workflow }} ❌\n\n*Repository:* https://github.com/${{ github.repository }}\n*Action:* https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n*Author:* ${{ github.actor }}\n*Event:* ${{ github.event_name }}\n*Benchmarks Result:* ${{ needs.Benchmarks.result }}\n*Tests Result:* ${{ needs.Tests.result }}"
-            }
+            text: "<!channel> GitHub Actions error for ${{ github.workflow }} ❌\n\n\n*Repository:* https://github.com/${{ github.repository }}\n*Action:* https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n*Author:* ${{ github.actor }}\n*Event:* ${{ github.event_name }}\n"
