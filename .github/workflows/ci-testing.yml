@@ -36,6 +36,7 @@ jobs:
           uv pip install --system -r requirements.txt coremltools openvino-dev tensorflow --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
           yolo checks
           uv pip list
+	  uv pip install onnx>=1.12.0 onnxscript>=0.1.0 onnxruntime onnxsim
       - name: Benchmark DetectionModel
         run: |
           python benchmarks.py --data coco128.yaml --weights ${{ matrix.model }}.pt --img 320 --hard-fail 0.29
