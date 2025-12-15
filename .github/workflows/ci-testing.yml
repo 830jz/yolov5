@@ -26,113 +26,28 @@ jobs:
         python-version: ["3.11"] # requires python<=3.11
         model: [yolov5n]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip' # 启用pip缓存，指定版本后缓存更稳定
-
-      # 步骤1：安装系统级底层依赖（ONNX/Protobuf必需）
-      - name: Install system dependencies (Protobuf + ONNX)
+      - uses: astral-sh/setup-uv@v7
+      - name: Install requirements
         run: |
-          sudo apt-get update && sudo apt-get install -y \
-            libprotobuf-dev \
-            protobuf-compiler \
-            libprotoc-dev \
-            build-essential
-        shell: bash
-
-      # 步骤2：创建pip约束文件，强制锁定依赖版本（防止被AutoUpdate覆盖）
-      - name: Create pip constraints file for ONNX/ONNXScript
-        run: |
-          cat > constraints.txt << EOF
-          onnx==1.20.0
-          onnxscript>=0.2.0
-          protobuf>=4.21.0,<5.0.0  # ONNX 1.20.0兼容的Protobuf版本
-          onnxruntime==1.17.0
-          onnxsim==0.4.33
-          EOF
-          cat constraints.txt # 验证约束文件
-        shell: bash
-
-      # 步骤3：彻底阻断Ultralytics AutoUpdate（源码+环境变量双层保障）
-      - name: Block Ultralytics AutoUpdate (source + env)
-        run: |
-          # 环境变量（新版Ultralytics生效）
-          echo "ULTRALYTICS_DISABLE_AUTOUPDATE=1" >> $GITHUB_ENV
-          echo "UltralyticsAutoUpdate=0" >> $GITHUB_ENV
-          echo "PYTHONWARNINGS=ignore" >> $GITHUB_ENV
-
-          # 源码修改（旧版Ultralytics生效：替换requirements.check/auto_update为空函数）
-          find . -name "requirements.py" -type f -exec python -c "
-          import fileinput
-          for line in fileinput.input('{}', inplace=True):
-              if 'def check(' in line:
-                  print('def check(*args, **kwargs):')
-                  print('    return True')
-              elif 'def auto_update(' in line:
-                  print('def auto_update(*args, **kwargs):')
-                  print('    return True')
-              else:
-                  print(line, end='')
-          " {} \;
-
-          # 注释掉所有调用auto_update/check的行
-          find . -name "*.py" -type f -exec sed -i 's/requirements\.check(/# requirements.check(/g' {} \;
-          find . -name "*.py" -type f -exec sed -i 's/auto_update(/# auto_update(/g' {} \;
-        shell: bash
-
-      # 步骤4：用pip安装所有依赖（强制使用约束文件，避免版本冲突）
-      - name: Install all dependencies with locked versions
-        run: |
-          # 升级pip并清理缓存
-          python -m pip install --upgrade pip setuptools wheel
-          pip cache purge
-
-          # 先安装约束文件中的依赖（强制版本）
-          pip install --constraint constraints.txt onnx onnxscript protobuf onnxruntime onnxsim
-
-          # 再安装YOLOv5的其他依赖（使用--constraint确保不冲突）
-          pip install --constraint constraints.txt -r requirements.txt coremltools openvino-dev tensorflow --extra-index-url https://download.pytorch.org/whl/cpu
-
-          # 关键：验证依赖是否真的安装到site-packages，且版本正确
-          echo "=== 验证依赖安装 ==="
-          python -c "import onnx; print(f'ONNX version: {onnx.__version__}')"
-          python -c "import onnxscript; print(f'ONNXScript version: {onnxscript.__version__}')"
-          python -c "import protobuf; print(f'Protobuf version: {protobuf.__version__}')"
-          pip list | grep -E "onnx|onnxscript|protobuf"
-
-          # 验证yolo环境
+          uv pip install --system -r requirements.txt coremltools openvino-dev "tensorflow<=2.19.0" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
           yolo checks
-        shell: bash
-
-      # 步骤5：预加载依赖并导出ONNX（单独进程，确保依赖生效）
-      - name: Pre-export ONNX model (ensure dependencies load)
-        run: |
-          # 导出时指定opset=17（ONNX 1.20.0支持的最新opset），并简化模型
-          python export.py --weights ${{ matrix.model }}.pt --include onnx --img 320 --simplify --opset 17
-          python export.py --weights ${{ matrix.model }}-seg.pt --include onnx --img 320 --simplify --opset 17
-          python export.py --weights ${{ matrix.model }}-cls.pt --include onnx --img 224 --simplify --opset 17
-        shell: bash
-
-      # 步骤6：执行基准测试（此时ONNX依赖已完全生效）
-      - name: Benchmark DetectionModel (with ONNX)
+          uv pip list
+      - name: Benchmark DetectionModel
         run: |
           python benchmarks.py --data coco128.yaml --weights ${{ matrix.model }}.pt --img 320 --hard-fail 0.29
-        shell: bash
-
-      - name: Benchmark SegmentationModel (with ONNX)
+      - name: Benchmark SegmentationModel
         run: |
           python benchmarks.py --data coco128-seg.yaml --weights ${{ matrix.model }}-seg.pt --img 320 --hard-fail 0.22
-        shell: bash
-
-      # 步骤7：测试预测（使用已导出的ONNX模型）
-      - name: Test predictions (with ONNX)
+      - name: Test predictions
         run: |
+          python export.py --weights ${{ matrix.model }}-cls.pt --include onnx --img 224
           python detect.py --weights ${{ matrix.model }}.onnx --img 320
           python segment/predict.py --weights ${{ matrix.model }}-seg.onnx --img 320
           python classify/predict.py --weights ${{ matrix.model }}-cls.onnx --img 224
-        shell: bash
 
   Tests:
     timeout-minutes: 60
@@ -140,110 +55,87 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-14] # macos-latest bug https://github.com/ultralytics/yolov5/pull/9049
         python-version: ["3.11"]
         model: [yolov5n]
         include:
           - os: ubuntu-latest
-            python-version: "3.8"
+            python-version: "3.8" # torch 1.8.0 requires python >=3.6, <=3.8
             model: yolov5n
-            torch: "1.8.0"
+            torch: "1.8.0" # min torch version CI https://pypi.org/project/torchvision/
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-
-      # 为Python3.8+Torch1.8.0单独处理依赖（兼容低版本ONNX）
-      - name: Install system dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+      - uses: astral-sh/setup-uv@v7
+      - name: Install requirements
         run: |
-          sudo apt-get update && sudo apt-get install -y libprotobuf-dev protobuf-compiler build-essential
-        shell: bash
-
-      - name: Create version-specific constraints
-        run: |
-          if [ "${{ matrix.torch }}" == "1.8.0" ]; then
-            # Torch1.8.0兼容的低版本依赖
-            cat > constraints.txt << EOF
-            onnx==1.9.0
-            onnxscript==0.1.0
-            protobuf==3.19.0
-            onnxruntime==1.8.1
-            EOF
-          else
-            # 其他环境使用ONNX1.20.0
-            cat > constraints.txt << EOF
-            onnx==1.20.0
-            onnxscript>=0.2.0
-            protobuf>=4.21.0,<5.0.0
-            onnxruntime==1.17.0
-            EOF
-          fi
-          cat constraints.txt
-        shell: bash
-
-      - name: Block Ultralytics AutoUpdate
-        run: |
-          echo "ULTRALYTICS_DISABLE_AUTOUPDATE=1" >> $GITHUB_ENV
-          find . -name "requirements.py" -type f -exec python -c "
-          import fileinput
-          for line in fileinput.input('{}', inplace=True):
-              if 'def check(' in line:
-                  print('def check(*args, **kwargs): return True')
-              elif 'def auto_update(' in line:
-                  print('def auto_update(*args, **kwargs): return True')
-              else:
-                  print(line, end='')
-          " {} \;
-        shell: bash
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip cache purge
           torch=""
           if [ "${{ matrix.torch }}" == "1.8.0" ]; then
             torch="torch==1.8.0 torchvision==0.9.0"
           fi
-          # 安装依赖并强制使用约束文件
-          pip install --constraint constraints.txt $torch
-          pip install --constraint constraints.txt -r requirements.txt coremltools openvino-dev tensorflow --extra-index-url https://download.pytorch.org/whl/cpu
-          # 验证依赖
-          python -c "import onnx; print(f'ONNX: {onnx.__version__}')" || echo "ONNX not installed (compatible with Torch1.8.0)"
-          yolo checks
-        shell: bash
-
-      # 剩余的Tests步骤保持不变，仅在导出时添加--opset参数（如需要）
-      - name: Test detection
-        shell: bash
+          uv pip install --system -r requirements.txt $torch --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+        shell: bash # for Windows compatibility
+      - name: Check environment
         run: |
-          m=${{ matrix.model }}
-          b=runs/train/exp/weights/best
-          python train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu
-          for d in cpu; do
-            for w in $m $b; do
-              python val.py --imgsz 64 --batch 32 --weights $w.pt --device $d
-              python detect.py --imgsz 64 --weights $w.pt --device $d
+          yolo checks
+          pip list
+      - name: Test detection
+        shell: bash # for Windows compatibility
+        run: |
+          # export PYTHONPATH="$PWD"  # to run '$ python *.py' files in subdirectories
+          m=${{ matrix.model }}  # official weights
+          b=runs/train/exp/weights/best  # best.pt checkpoint
+          python train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu  # train
+          for d in cpu; do  # devices
+            for w in $m $b; do  # weights
+              python val.py --imgsz 64 --batch 32 --weights $w.pt --device $d  # val
+              python detect.py --imgsz 64 --weights $w.pt --device $d  # detect
             done
           done
-          python hubconf.py --model $m
-          python models/yolo.py --cfg $m.yaml
-          # 导出TorchScript（如需ONNX，添加--include onnx --opset 12）
-          python export.py --weights $m.pt --img 64 --include torchscript
+          python hubconf.py --model $m  # hub
+          # python models/tf.py --weights $m.pt  # build TF model
+          python models/yolo.py --cfg $m.yaml  # build PyTorch model
+          python export.py --weights $m.pt --img 64 --include torchscript  # export
           python - <<EOF
           import torch
           im = torch.zeros([1, 3, 64, 64])
           for path in '$m', '$b':
               model = torch.hub.load('.', 'custom', path=path, source='local')
               print(model('data/images/bus.jpg'))
-              model(im)
+              model(im)  # warmup, build grids for trace
               torch.jit.trace(model, [im])
           EOF
-        shell: bash
-
-      # 其余Test步骤（segmentation/classification）同理，如需ONNX则添加导出参数
+      - name: Test segmentation
+        shell: bash # for Windows compatibility
+        run: |
+          m=${{ matrix.model }}-seg  # official weights
+          b=runs/train-seg/exp/weights/best  # best.pt checkpoint
+          python segment/train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu  # train
+          python segment/train.py --imgsz 64 --batch 32 --weights '' --cfg $m.yaml --epochs 1 --device cpu  # train
+          for d in cpu; do  # devices
+            for w in $m $b; do  # weights
+              python segment/val.py --imgsz 64 --batch 32 --weights $w.pt --device $d  # val
+              python segment/predict.py --imgsz 64 --weights $w.pt --device $d  # predict
+              python export.py --weights $w.pt --img 64 --include torchscript --device $d  # export
+            done
+          done
+      - name: Test classification
+        shell: bash # for Windows compatibility
+        run: |
+          m=${{ matrix.model }}-cls.pt  # official weights
+          b=runs/train-cls/exp/weights/best.pt  # best.pt checkpoint
+          python classify/train.py --imgsz 32 --model $m --data mnist160 --epochs 1  # train
+          python classify/val.py --imgsz 32 --weights $b --data ../datasets/mnist160  # val
+          python classify/predict.py --imgsz 32 --weights $b --source ../datasets/mnist160/test/7/60.png  # predict
+          python classify/predict.py --imgsz 32 --weights $m --source data/images/bus.jpg  # predict
+          python export.py --weights $b --img 64 --include torchscript  # export
+          python - <<EOF
+          import torch
+          for path in '$m', '$b':
+              model = torch.hub.load('.', 'custom', path=path, source='local')
+          EOF
 
   Summary:
     runs-on: ubuntu-latest
@@ -252,7 +144,7 @@ jobs:
     steps:
       - name: Check for failure and notify
         if: (needs.Benchmarks.result == 'failure' || needs.Tests.result == 'failure' || needs.Benchmarks.result == 'cancelled' || needs.Tests.result == 'cancelled') && github.repository == 'ultralytics/yolov5' && (github.event_name == 'schedule' || github.event_name == 'push') && github.run_attempt == '1'
-        uses: slackapi/slack-github-action@v2.1.0
+        uses: slackapi/slack-github-action@v2.1.1
         with:
           webhook-type: incoming-webhook
           webhook: ${{ secrets.SLACK_WEBHOOK_URL_YOLO }}
