@@ -18,7 +18,7 @@ tqdm>=4.66.3
 ultralytics>=8.2.64  # https://ultralytics.com
 onnxscript
 onnxsim
-onnx>=1.10.0  # ONNX export
+onnx==1.10.0  # ONNX export
 onnx-simplifier>=0.4.1  # ONNX simplifier
 # protobuf<=3.20.1  # https://github.com/ultralytics/yolov5/issues/8012
 
