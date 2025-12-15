@@ -1,152 +1,329 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
-
 # YOLOv5 Continuous Integration (CI) GitHub Actions tests
-
 name: YOLOv5 CI
 
+# 最小权限原则
 permissions:
   contents: read
+  actions: read  # 可选：用于缓存和Artifact操作
 
+# 触发条件
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
   schedule:
-    - cron: "0 0 * * *" # runs at 00:00 UTC every day
-  workflow_dispatch:
+    - cron: "0 0 * * *"  # 每天UTC 0点运行
+  workflow_dispatch:  # 手动触发
+
+# 全局环境变量（减少硬编码，便于维护）
+env:
+  PYTHON_VERSION: "3.11"
+  MODEL: "yolov5n"
+  IMGSZ_BENCHMARK: 320
+  IMGSZ_TEST: 64
+  BATCH_SIZE_TEST: 32
+  EPOCHS_TEST: 1
+  # 兼容版本配置（关键：解决onnx与onnxscript版本冲突）
+  ONNX_VERSION: "1.20.0"
+  ONNXSCRIPT_VERSION: "0.11.0"
+  ONNX_SIMPLIFIER_VERSION: "0.4.1"
 
 jobs:
+  # 基准测试任务：检测/分割模型性能 + ONNX导出验证
   Benchmarks:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.11"] # requires python<=3.11
+        python-version: ["3.11"]  # 与全局变量保持一致
         model: [yolov5n]
     steps:
+      # 1. 检出代码
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+
+      # 2. 配置Python环境
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v7
-      - name: Install requirements
+          cache: "pip"  # 启用pip缓存（可选，与uv缓存二选一）
+
+      # 3. 安装uv包管理器（现代Python包管理器）
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      # 4. 缓存uv依赖（核心：加快依赖安装速度，避免重复下载）
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            **/__pycache__
+          key: ${{ matrix.os }}-uv-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ matrix.os }}-uv-
+
+      # 5. 缓存数据集（核心：避免重复下载coco128、mnist160等）
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: datasets/
+          key: ${{ matrix.os }}-datasets-${{ hashFiles('**/*.yaml') }}
+          restore-keys: |
+            ${{ matrix.os }}-datasets-
+
+      # 6. 安装依赖（核心：移除有害参数，显式安装兼容版本）
+      - name: Install dependencies
         run: |
-          uv pip install -r requirements.txt coremltools onnxscript openvino-dev "tensorflow<=2.19.0" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+          # 关键：移除--system和--index-strategy unsafe-best-match（避免依赖解析错误）
+          # 显式安装onnx、onnxscript、onnx-simplifier的兼容版本（强制安装，避免被跳过）
+          uv pip install -U \
+            -r requirements.txt \
+            coremltools \
+            openvino-dev \
+            "tensorflow<=2.19.0" \
+            onnx==${{ env.ONNX_VERSION }} \
+            onnxscript==${{ env.ONNXSCRIPT_VERSION }} \
+            onnx-simplifier>=${{ env.ONNX_SIMPLIFIER_VERSION }} \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+          # 关键验证步骤：确保onnx、onnxscript能正常导入（失败时直接终止CI，便于调试）
+          python -c "import onnx, onnxscript, onnxsim; print(f'onnx: {onnx.__version__}'); print(f'onnxscript: {onnxscript.__version__}'); print('✅ ONNX dependencies imported successfully!')"
+
+          # 检查环境并列出已安装包（调试用）
           yolo checks
           uv pip list
+
+      # 7. 基准测试：检测模型
       - name: Benchmark DetectionModel
         run: |
-          python benchmarks.py --data coco128.yaml --weights ${{ matrix.model }}.pt --img 320 --hard-fail 0.29
+          python benchmarks.py \
+            --data coco128.yaml \
+            --weights ${{ matrix.model }}.pt \
+            --img ${{ env.IMGSZ_BENCHMARK }} \
+            --hard-fail 0.29
+
+      # 8. 基准测试：分割模型
       - name: Benchmark SegmentationModel
         run: |
-          python benchmarks.py --data coco128-seg.yaml --weights ${{ matrix.model }}-seg.pt --img 320 --hard-fail 0.22
-      - name: Test predictions
+          python benchmarks.py \
+            --data coco128-seg.yaml \
+            --weights ${{ matrix.model }}-seg.pt \
+            --img ${{ env.IMGSZ_BENCHMARK }} \
+            --hard-fail 0.22
+
+      # 9. 测试预测：ONNX导出+推理
+      - name: Test predictions (ONNX)
         run: |
+          # 导出ONNX格式
           python export.py --weights ${{ matrix.model }}-cls.pt --include onnx --img 224
-          python detect.py --weights ${{ matrix.model }}.onnx --img 320
-          python segment/predict.py --weights ${{ matrix.model }}-seg.onnx --img 320
+          # 验证检测/分割/分类的ONNX推理
+          python detect.py --weights ${{ matrix.model }}.onnx --img ${{ env.IMGSZ_BENCHMARK }}
+          python segment/predict.py --weights ${{ matrix.model }}-seg.onnx --img ${{ env.IMGSZ_BENCHMARK }}
           python classify/predict.py --weights ${{ matrix.model }}-cls.onnx --img 224
 
+      # 10. 上传基准测试日志（失败时上传，便于调试）
+      - name: Upload Benchmarks artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ${{ matrix.os }}-${{ matrix.python-version }}-benchmarks
+          path: |
+            runs/
+            *.log
+          retention-days: 7  # 保留7天
+
+  # 全功能测试任务：跨系统/Python版本的检测/分割/分类测试
   Tests:
     timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14] # macos-latest bug https://github.com/ultralytics/yolov5/pull/9049
+        os: [ubuntu-latest, windows-latest, macos-14]  # 规避macos-latest的bug
         python-version: ["3.11"]
         model: [yolov5n]
         include:
           - os: ubuntu-latest
-            python-version: "3.8" # torch 1.8.0 requires python >=3.6, <=3.8
-            model: yolov5n
-            torch: "1.8.0" # min torch version CI https://pypi.org/project/torchvision/
+            python-version: "3.8"  # 兼容torch 1.8.0（最低版本）
+            model: [yolov5n]
+            torch: "1.8.0"
     steps:
+      # 1. 检出代码
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+
+      # 2. 配置Python环境
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: astral-sh/setup-uv@v7
-      - name: Install requirements
+
+      # 3. 安装uv包管理器
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      # 4. 缓存uv依赖
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ matrix.os }}-uv-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ matrix.os }}-uv-${{ matrix.python-version }}-
+
+      # 5. 缓存数据集
+      - name: Cache datasets
+        uses: actions/cache@v4
+        with:
+          path: datasets/
+          key: ${{ matrix.os }}-datasets-${{ hashFiles('**/*.yaml') }}
+          restore-keys: |
+            ${{ matrix.os }}-datasets-
+
+      # 6. 安装依赖（核心：处理torch旧版本，移除有害参数）
+      - name: Install dependencies
+        shell: bash  # 跨系统兼容
         run: |
-          torch=""
+          # 处理torch旧版本（1.8.0）的安装
+          torch_pkgs=""
           if [ "${{ matrix.torch }}" == "1.8.0" ]; then
-            torch="torch==1.8.0 torchvision==0.9.0"
+            # torch 1.8.0的cpu版本需要指定旧索引
+            torch_pkgs="torch==1.8.0+cpu torchvision==0.9.0+cpu -f https://download.pytorch.org/whl/torch_stable.html"
           fi
-          uv pip install --system -r requirements.txt $torch --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
-        shell: bash # for Windows compatibility
-      - name: Check environment
-        run: |
+
+          # 关键：移除--system和--index-strategy unsafe-best-match
+          uv pip install -U \
+            -r requirements.txt \
+            $torch_pkgs \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+          # 验证环境
           yolo checks
-          pip list
+          python -m pip list
+
+      # 7. 测试检测模型（训练/验证/推理/导出）
       - name: Test detection
-        shell: bash # for Windows compatibility
+        shell: bash
         run: |
-          # export PYTHONPATH="$PWD"  # to run '$ python *.py' files in subdirectories
-          m=${{ matrix.model }}  # official weights
-          b=runs/train/exp/weights/best  # best.pt checkpoint
-          python train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu  # train
-          for d in cpu; do  # devices
-            for w in $m $b; do  # weights
-              python val.py --imgsz 64 --batch 32 --weights $w.pt --device $d  # val
-              python detect.py --imgsz 64 --weights $w.pt --device $d  # detect
+          m=${{ matrix.model }}  # 官方权重
+          b=runs/train/exp/weights/best  # 训练后的权重
+          # 训练（1 epoch，cpu）
+          python train.py \
+            --imgsz ${{ env.IMGSZ_TEST }} \
+            --batch ${{ env.BATCH_SIZE_TEST }} \
+            --weights $m.pt \
+            --cfg $m.yaml \
+            --epochs ${{ env.EPOCHS_TEST }} \
+            --device cpu
+          # 验证+推理（cpu）
+          for d in cpu; do
+            for w in $m $b; do
+              python val.py --imgsz ${{ env.IMGSZ_TEST }} --batch ${{ env.BATCH_SIZE_TEST }} --weights $w.pt --device $d
+              python detect.py --imgsz ${{ env.IMGSZ_TEST }} --weights $w.pt --device $d
             done
           done
-          python hubconf.py --model $m  # hub
-          # python models/tf.py --weights $m.pt  # build TF model
-          python models/yolo.py --cfg $m.yaml  # build PyTorch model
-          python export.py --weights $m.pt --img 64 --include torchscript  # export
+          # 测试hubconf、模型构建、导出
+          python hubconf.py --model $m
+          python models/yolo.py --cfg $m.yaml
+          python export.py --weights $m.pt --img ${{ env.IMGSZ_TEST }} --include torchscript
+          # 测试torch hub加载和jit追踪
           python - <<EOF
           import torch
-          im = torch.zeros([1, 3, 64, 64])
+          im = torch.zeros([1, 3, ${{ env.IMGSZ_TEST }}, ${{ env.IMGSZ_TEST }}])
           for path in '$m', '$b':
-              model = torch.hub.load('.', 'custom', path=path, source='local')
+              model = torch.hub.load('.', 'custom', path=path+'.pt', source='local')
               print(model('data/images/bus.jpg'))
-              model(im)  # warmup, build grids for trace
+              model(im)  # warmup
               torch.jit.trace(model, [im])
           EOF
+
+      # 8. 测试分割模型
       - name: Test segmentation
-        shell: bash # for Windows compatibility
+        shell: bash
         run: |
-          m=${{ matrix.model }}-seg  # official weights
-          b=runs/train-seg/exp/weights/best  # best.pt checkpoint
-          python segment/train.py --imgsz 64 --batch 32 --weights $m.pt --cfg $m.yaml --epochs 1 --device cpu  # train
-          python segment/train.py --imgsz 64 --batch 32 --weights '' --cfg $m.yaml --epochs 1 --device cpu  # train
-          for d in cpu; do  # devices
-            for w in $m $b; do  # weights
-              python segment/val.py --imgsz 64 --batch 32 --weights $w.pt --device $d  # val
-              python segment/predict.py --imgsz 64 --weights $w.pt --device $d  # predict
-              python export.py --weights $w.pt --img 64 --include torchscript --device $d  # export
+          m=${{ matrix.model }}-seg  # 官方权重
+          b=runs/train-seg/exp/weights/best  # 训练后的权重
+          # 训练（带权重/空权重）
+          python segment/train.py \
+            --imgsz ${{ env.IMGSZ_TEST }} \
+            --batch ${{ env.BATCH_SIZE_TEST }} \
+            --weights $m.pt \
+            --cfg $m.yaml \
+            --epochs ${{ env.EPOCHS_TEST }} \
+            --device cpu
+          python segment/train.py \
+            --imgsz ${{ env.IMGSZ_TEST }} \
+            --batch ${{ env.BATCH_SIZE_TEST }} \
+            --weights '' \
+            --cfg $m.yaml \
+            --epochs ${{ env.EPOCHS_TEST }} \
+            --device cpu
+          # 验证+推理+导出
+          for d in cpu; do
+            for w in $m $b; do
+              python segment/val.py --imgsz ${{ env.IMGSZ_TEST }} --batch ${{ env.BATCH_SIZE_TEST }} --weights $w.pt --device $d
+              python segment/predict.py --imgsz ${{ env.IMGSZ_TEST }} --weights $w.pt --device $d
+              python export.py --weights $w.pt --img ${{ env.IMGSZ_TEST }} --include torchscript --device $d
             done
           done
+
+      # 9. 测试分类模型
       - name: Test classification
-        shell: bash # for Windows compatibility
+        shell: bash
         run: |
-          m=${{ matrix.model }}-cls.pt  # official weights
-          b=runs/train-cls/exp/weights/best.pt  # best.pt checkpoint
-          python classify/train.py --imgsz 32 --model $m --data mnist160 --epochs 1  # train
-          python classify/val.py --imgsz 32 --weights $b --data ../datasets/mnist160  # val
-          python classify/predict.py --imgsz 32 --weights $b --source ../datasets/mnist160/test/7/60.png  # predict
-          python classify/predict.py --imgsz 32 --weights $m --source data/images/bus.jpg  # predict
-          python export.py --weights $b --img 64 --include torchscript  # export
+          m=${{ matrix.model }}-cls.pt  # 官方权重
+          b=runs/train-cls/exp/weights/best.pt  # 训练后的权重
+          # 训练
+          python classify/train.py \
+            --imgsz 32 \
+            --model $m \
+            --data mnist160 \
+            --epochs ${{ env.EPOCHS_TEST }}
+          # 验证+推理
+          python classify/val.py --imgsz 32 --weights $b --data ../datasets/mnist160
+          python classify/predict.py --imgsz 32 --weights $b --source ../datasets/mnist160/test/7/60.png
+          python classify/predict.py --imgsz 32 --weights $m --source data/images/bus.jpg
+          # 导出
+          python export.py --weights $b --img ${{ env.IMGSZ_TEST }} --include torchscript
+          # 测试hub加载
           python - <<EOF
           import torch
           for path in '$m', '$b':
               model = torch.hub.load('.', 'custom', path=path, source='local')
           EOF
 
+      # 10. 上传测试日志（失败时上传）
+      - name: Upload Tests artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.torch || 'latest' }}-tests
+          path: runs/
+          retention-days: 7
+
+  # 结果汇总：失败时发送Slack通知
   Summary:
     runs-on: ubuntu-latest
     needs: [Benchmarks, Tests]
-    if: always()
+    if: always()  # 无论前序任务是否失败，都运行
     steps:
-      - name: Check for failure and notify
-        if: (needs.Benchmarks.result == 'failure' || needs.Tests.result == 'failure' || needs.Benchmarks.result == 'cancelled' || needs.Tests.result == 'cancelled') && github.repository == 'ultralytics/yolov5' && (github.event_name == 'schedule' || github.event_name == 'push') && github.run_attempt == '1'
+      - name: Send Slack notification on failure/cancellation
+        if: |
+          (needs.Benchmarks.result == 'failure' || needs.Tests.result == 'failure' ||
+           needs.Benchmarks.result == 'cancelled' || needs.Tests.result == 'cancelled') &&
+          github.repository == 'ultralytics/yolov5' &&
+          (github.event_name == 'schedule' || github.event_name == 'push') &&
+          github.run_attempt == '1'
         uses: slackapi/slack-github-action@v2.1.1
         with:
           webhook-type: incoming-webhook
           webhook: ${{ secrets.SLACK_WEBHOOK_URL_YOLO }}
           payload: |
-            text: "<!channel> GitHub Actions error for ${{ github.workflow }} ❌\n\n\n*Repository:* https://github.com/${{ github.repository }}\n*Action:* https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n*Author:* ${{ github.actor }}\n*Event:* ${{ github.event_name }}\n"
+            {
+              "text": "<!channel> GitHub Actions error for ${{ github.workflow }} ❌\n\n*Repository:* https://github.com/${{ github.repository }}\n*Action:* https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n*Author:* ${{ github.actor }}\n*Event:* ${{ github.event_name }}\n*Benchmarks Result:* ${{ needs.Benchmarks.result }}\n*Tests Result:* ${{ needs.Tests.result }}"
+            }
