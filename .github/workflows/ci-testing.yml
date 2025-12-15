@@ -35,6 +35,7 @@ jobs:
         run: |
           uv pip install --system -r requirements.txt coremltools openvino-dev "tensorflow<=2.19.0" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
           yolo checks
+          uv pip onnxscript
           uv pip list
       - name: Benchmark DetectionModel
         run: |
