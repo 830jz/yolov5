@@ -23,10 +23,12 @@ jobs:
 
       - name: Download and install lychee
         run: |
+          # 下载最新版lychee预编译包
           LYCHEE_URL=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | grep "browser_download_url" | grep "x86_64-unknown-linux-gnu.tar.gz" | cut -d '"' -f 4)
           curl -L $LYCHEE_URL | tar xz -C /usr/local/bin
-          # 验证lychee安装成功
+          # 验证安装并查看版本和帮助（关键：确认参数是否存在）
           lychee --version
+          lychee --help | grep -E "exclude|scheme|accept" # 查看核心参数说明
 
       - name: Test Markdown and HTML links with retry
         uses: ultralytics/actions/retry@main
@@ -35,27 +37,37 @@ jobs:
           retry_delay_seconds: 60
           retries: 2
           run: |
-            # 1. 开启globstar（支持**递归匹配）+ pipefail（保留管道中第一个错误的退出码）
-            shopt -s globstar
-            set -o pipefail
-            # 2. 执行lychee（修正续行符、正则、引号问题）
+            # 1. 关键配置：开启递归通配符 + 保留管道错误码 + 不自动退出（兼容重试逻辑）
+            shopt -s globstar  # 让**递归匹配子目录
+            set -o pipefail    # 管道中任意命令失败则返回对应退出码
+            set +e             # 配合重试逻辑，不立即退出
+
+            # 2. 执行lychee（核心：移除--regex，改用glob模式的--exclude）
             lychee \
               --scheme https \
               --timeout 60 \
               --insecure \
               --accept 100..=103,200..=299,401,403,429,500,502,999 \
               --exclude-all-private \
-              --regex \ # 关键：添加--regex，让lychee解析正则表达式
-              --exclude "https?://(www\.)?(linkedin\.com|twitter\.com|x\.com|instagram\.com|kaggle\.com|fonts\.gstatic\.com|url\.com)" \
+              # 方式1：用,分隔多个glob规则（推荐，简洁）
+              --exclude "https://*.linkedin.com,https://*.twitter.com,https://*.x.com,https://*.instagram.com,https://*.kaggle.com,https://*.fonts.gstatic.com,https://*.url.com,http://*.linkedin.com,http://*.twitter.com,http://*.x.com,http://*.instagram.com,http://*.kaggle.com,http://*.fonts.gstatic.com,http://*.url.com" \
+              # 方式2：也可以用多个--exclude参数（更清晰，二选一即可）
+              # --exclude "https://*.linkedin.com" \
+              # --exclude "https://*.twitter.com" \
+              # --exclude "https://*.x.com" \
+              # --exclude "https://*.instagram.com" \
+              # --exclude "http://*.linkedin.com" \
+              # --exclude "http://*.twitter.com" \
               --exclude-path "**/ci.yaml" \
               --github-token ${{ secrets.GITHUB_TOKEN }} \
               --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36" \
-              ./**/*.md \ # 去掉单引号，让glob生效
+              # inputs路径：去掉单引号，让glob生效（必须放在最后）
+              ./**/*.md \
               ./**/*.html | tee -a $GITHUB_STEP_SUMMARY
 
-            # 3. 检查lychee输出（兼容0 error(s)/0 Errors/0 errors）
-            if ! grep -qi "0 error(s)\|0 Errors\|0 errors" "$GITHUB_STEP_SUMMARY"; then
-              exit 1
+            # 3. 检查lychee输出，兼容不同版本的错误提示
+            if ! grep -qi "0 error(s)\|0 Errors\|0 errors\|no broken links" "$GITHUB_STEP_SUMMARY"; then
+              exit 1  # 有错误则返回非0，触发重试
             fi
 
       - name: Test Markdown, HTML, YAML, Python and Notebook links with retry
@@ -66,21 +78,24 @@ jobs:
           retry_delay_seconds: 60
           retries: 2
           run: |
-            # 1. 开启globstar + pipefail
+            # 同样的前置配置
             shopt -s globstar
             set -o pipefail
-            # 2. 执行lychee（修正同上）
+            set +e
+
+            # 执行lychee（参数与上一步一致，仅增加inputs路径）
             lychee \
               --scheme https \
               --timeout 60 \
               --insecure \
               --accept 100..=103,200..=299,429,999 \
               --exclude-all-private \
-              --regex \
-              --exclude "https?://(www\.)?(linkedin\.com|twitter\.com|x\.com|instagram\.com|kaggle\.com|fonts\.gstatic\.com|url\.com)" \
+              # 改用glob模式的exclude规则
+              --exclude "https://*.linkedin.com,https://*.twitter.com,https://*.x.com,https://*.instagram.com,https://*.kaggle.com,https://*.fonts.gstatic.com,https://*.url.com,http://*.linkedin.com,http://*.twitter.com,http://*.x.com,http://*.instagram.com,http://*.kaggle.com,http://*.fonts.gstatic.com,http://*.url.com" \
               --exclude-path "**/ci.yaml" \
               --github-token ${{ secrets.GITHUB_TOKEN }} \
               --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36" \
+              # 增加更多inputs路径
               ./**/*.md \
               ./**/*.html \
               ./**/*.yml \
@@ -88,7 +103,7 @@ jobs:
               ./**/*.py \
               ./**/*.ipynb | tee -a $GITHUB_STEP_SUMMARY
 
-            # 3. 检查lychee输出
-            if ! grep -qi "0 error(s)\|0 Errors\|0 errors" "$GITHUB_STEP_SUMMARY"; then
+            # 检查输出
+            if ! grep -qi "0 error(s)\|0 Errors\|0 errors\|no broken links" "$GITHUB_STEP_SUMMARY"; then
               exit 1
             fi
