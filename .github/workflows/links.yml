@@ -25,6 +25,8 @@ jobs:
         run: |
           LYCHEE_URL=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | grep "browser_download_url" | grep "x86_64-unknown-linux-gnu.tar.gz" | cut -d '"' -f 4)
           curl -L $LYCHEE_URL | tar xz -C /usr/local/bin
+          # 验证lychee安装成功
+          lychee --version
 
       - name: Test Markdown and HTML links with retry
         uses: ultralytics/actions/retry@main
@@ -33,22 +35,26 @@ jobs:
           retry_delay_seconds: 60
           retries: 2
           run: |
+            # 1. 开启globstar（支持**递归匹配）+ pipefail（保留管道中第一个错误的退出码）
+            shopt -s globstar
+            set -o pipefail
+            # 2. 执行lychee（修正续行符、正则、引号问题）
             lychee \
-            --scheme 'https' \
-            --timeout 60 \
-            --insecure \
-            --accept 100..=103,200..=299,401,403,429,500,502,999 \
-            --exclude-all-private \
-            # 修复：双引号包裹+转义?和|
-            --exclude "https\?://(www\.)?(linkedin\.com\|twitter\.com\|x\.com\|instagram\.com\|kaggle\.com\|fonts\.gstatic\.com\|url\.com)" \
-            --exclude-path '**/ci.yaml' \
-            --github-token ${{ secrets.GITHUB_TOKEN }} \
-            --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36" \
-            './**/*.md' \
-            './**/*.html' | tee -a $GITHUB_STEP_SUMMARY
+              --scheme https \
+              --timeout 60 \
+              --insecure \
+              --accept 100..=103,200..=299,401,403,429,500,502,999 \
+              --exclude-all-private \
+              --regex \ # 关键：添加--regex，让lychee解析正则表达式
+              --exclude "https?://(www\.)?(linkedin\.com|twitter\.com|x\.com|instagram\.com|kaggle\.com|fonts\.gstatic\.com|url\.com)" \
+              --exclude-path "**/ci.yaml" \
+              --github-token ${{ secrets.GITHUB_TOKEN }} \
+              --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36" \
+              ./**/*.md \ # 去掉单引号，让glob生效
+              ./**/*.html | tee -a $GITHUB_STEP_SUMMARY
 
-            # 修复：匹配更通用的0 error(s)，兼容大小写和单复数
-            if ! grep -qi "0 error(s)\|0 Errors" $GITHUB_STEP_SUMMARY; then
+            # 3. 检查lychee输出（兼容0 error(s)/0 Errors/0 errors）
+            if ! grep -qi "0 error(s)\|0 Errors\|0 errors" "$GITHUB_STEP_SUMMARY"; then
               exit 1
             fi
 
@@ -60,25 +66,29 @@ jobs:
           retry_delay_seconds: 60
           retries: 2
           run: |
+            # 1. 开启globstar + pipefail
+            shopt -s globstar
+            set -o pipefail
+            # 2. 执行lychee（修正同上）
             lychee \
-            --scheme 'https' \
-            --timeout 60 \
-            --insecure \
-            --accept 100..=103,200..=299,429,999 \
-            --exclude-all-private \
-            # 修复：双引号包裹+转义?和|
-            --exclude "https\?://(www\.)?(linkedin\.com\|twitter\.com\|x\.com\|instagram\.com\|kaggle\.com\|fonts\.gstatic\.com\|url\.com)" \
-            --exclude-path '**/ci.yaml' \
-            --github-token ${{ secrets.GITHUB_TOKEN }} \
-            --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36" \
-            './**/*.md' \
-            './**/*.html' \
-            './**/*.yml' \
-            './**/*.yaml' \
-            './**/*.py' \
-            './**/*.ipynb' | tee -a $GITHUB_STEP_SUMMARY
+              --scheme https \
+              --timeout 60 \
+              --insecure \
+              --accept 100..=103,200..=299,429,999 \
+              --exclude-all-private \
+              --regex \
+              --exclude "https?://(www\.)?(linkedin\.com|twitter\.com|x\.com|instagram\.com|kaggle\.com|fonts\.gstatic\.com|url\.com)" \
+              --exclude-path "**/ci.yaml" \
+              --github-token ${{ secrets.GITHUB_TOKEN }} \
+              --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.183 Safari/537.36" \
+              ./**/*.md \
+              ./**/*.html \
+              ./**/*.yml \
+              ./**/*.yaml \
+              ./**/*.py \
+              ./**/*.ipynb | tee -a $GITHUB_STEP_SUMMARY
 
-            # 修复：匹配更通用的0 error(s)，兼容大小写和单复数
-            if ! grep -qi "0 error(s)\|0 Errors" $GITHUB_STEP_SUMMARY; then
+            # 3. 检查lychee输出
+            if ! grep -qi "0 error(s)\|0 Errors\|0 errors" "$GITHUB_STEP_SUMMARY"; then
               exit 1
             fi
