@@ -14,15 +14,13 @@ jobs:
         with:
           fetch-depth: 1 # 确保完整检出代码，避免文件缺失
 
-      - name: Download and install lychee
+      - name: Install lychee (via Cargo, stable)
         run: |
-          # 下载并安装lychee（稳定版）
-          LYCHEE_VERSION=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | jq -r .tag_name)
-          LYCHEE_URL="https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz"
-          curl -L $LYCHEE_URL | tar xz -C /usr/local/bin
-          # 验证安装并赋予执行权限
-          chmod +x /usr/local/bin/lychee
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          cargo install lychee --version 0.15.0
           lychee --version
+        shell: bash
 
       - name: Test Markdown and HTML links with retry
         uses: ultralytics/actions/retry@main
