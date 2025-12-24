@@ -18,7 +18,7 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source $HOME/.cargo/env
-          cargo install lychee --version 0.15.0
+          cargo install lychee --version 0.16.0
           lychee --version
         shell: bash
 
